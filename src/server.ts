@@ -176,9 +176,13 @@ app.get('/risk-profile', async (req, res, next) => {
     )
 
     res.json({
+      x402_tx: settleResult.transaction,
+      payer: settleResult.payer ?? verifyResult.payer,
+      payTo: requirements.payTo,
+      amount: requirements.amount,
       risk_score: 87,
       risk_level: 'high',
-      recommendation: 'block_transaction',
+      recommendation: 'block_transaction'
     })
   } catch (error) {
     next(error)
