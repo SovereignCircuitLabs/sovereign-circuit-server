@@ -58,7 +58,6 @@ npm run setup
 ```
 Copy `.env.example` → `.env` and fill in:
 ```bash
-CLIENT_PRIVATE_KEY=0x...        # buyer wallet (funds Gateway, signs payments)
 SERVER_PRIVATE_KEY=0x...        # trusted relayer = owner of GamePayment
 SERVER_ADDRESS=0x...
 
@@ -66,7 +65,6 @@ GAME_PAYMENT_ADDRESS=0x...      # deployed GamePayment contract (required)
 NPC_NFT_ADDRESS=0x...           # NpcCharacter ERC-721 (enables TBA routing)
 ERC6551_REGISTRY=0x...
 ERC6551_IMPLEMENTATION=0x...
-# ERC6551_SALT defaults to 0x000...0
 ```
 
 #### 3.4 Fund the Circle Gateway (one-time)
@@ -87,12 +85,6 @@ Paywall: GET /item/:id -> USDC nanopayment (Circle Gateway) + buyItemX402
 Sanity check (second terminal):
 ```bash
 curl -i http://localhost:4021/item/1     # should return HTTP/1.1 402 Payment Required
-```
-
-#### 3.6 End-to-end test (optional)
-A TypeScript client that mirrors the Unity buyer's exact HTTP / EIP-712 flow:
-```bash
-npm run client
 ```
 
 > Point the **Unity client** at `http://localhost:4021/item/` (`ArcNanopaymentClient.x402ServerBaseUrl`). Always start this server **before** entering the Unity MainScene.
@@ -148,7 +140,6 @@ npm run setup
 ```
 复制 `.env.example` → `.env` 并填写：
 ```bash
-CLIENT_PRIVATE_KEY=0x...        # 买家钱包(为 Gateway 注资、签名支付)
 SERVER_PRIVATE_KEY=0x...        # 受信任 relayer = GamePayment 的 owner
 SERVER_ADDRESS=0x...
 
@@ -156,7 +147,6 @@ GAME_PAYMENT_ADDRESS=0x...      # 已部署的 GamePayment 合约(必填)
 NPC_NFT_ADDRESS=0x...           # NpcCharacter ERC-721(启用 TBA 路由)
 ERC6551_REGISTRY=0x...
 ERC6551_IMPLEMENTATION=0x...
-# ERC6551_SALT 默认 0x000...0
 ```
 
 #### 3.4 为 Circle Gateway 注资(一次性)
@@ -177,12 +167,6 @@ Paywall: GET /item/:id -> USDC nanopayment (Circle Gateway) + buyItemX402
 另开终端验证：
 ```bash
 curl -i http://localhost:4021/item/1     # 应返回 HTTP/1.1 402 Payment Required
-```
-
-#### 3.6 端到端测试(可选)
-一个与 Unity 买家完全一致的 HTTP / EIP-712 流程的 TypeScript 客户端：
-```bash
-npm run client
 ```
 
 > 把 **Unity 客户端** 指向 `http://localhost:4021/item/`(`ArcNanopaymentClient.x402ServerBaseUrl`)。进入 Unity MainScene **之前**务必先启动本 server。
@@ -238,7 +222,6 @@ npm run setup
 ```
 複製 `.env.example` → `.env` 並填寫：
 ```bash
-CLIENT_PRIVATE_KEY=0x...        # 買家錢包(為 Gateway 注資、簽名支付)
 SERVER_PRIVATE_KEY=0x...        # 受信任 relayer = GamePayment 的 owner
 SERVER_ADDRESS=0x...
 
@@ -246,7 +229,6 @@ GAME_PAYMENT_ADDRESS=0x...      # 已部署的 GamePayment 合約(必填)
 NPC_NFT_ADDRESS=0x...           # NpcCharacter ERC-721(啟用 TBA 路由)
 ERC6551_REGISTRY=0x...
 ERC6551_IMPLEMENTATION=0x...
-# ERC6551_SALT 預設 0x000...0
 ```
 
 #### 3.4 為 Circle Gateway 注資(一次性)
@@ -267,12 +249,6 @@ Paywall: GET /item/:id -> USDC nanopayment (Circle Gateway) + buyItemX402
 另開終端驗證：
 ```bash
 curl -i http://localhost:4021/item/1     # 應回傳 HTTP/1.1 402 Payment Required
-```
-
-#### 3.6 端對端測試(可選)
-一個與 Unity 買家完全一致的 HTTP / EIP-712 流程的 TypeScript 客戶端：
-```bash
-npm run client
 ```
 
 > 把 **Unity 客戶端** 指向 `http://localhost:4021/item/`(`ArcNanopaymentClient.x402ServerBaseUrl`)。進入 Unity MainScene **之前**務必先啟動本 server。
