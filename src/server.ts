@@ -1,195 +1,46 @@
-import 'dotenv/config'
 import express from 'express'
-import { CHAIN_CONFIGS } from '@circle-fin/x402-batching/client'
-import { BatchFacilitatorClient } from '@circle-fin/x402-batching/server'
+import { getAddress, type Address } from 'viem'
 import {
-  createPublicClient,
-  createWalletClient,
-  getAddress,
-  http,
-  isAddress,
-  parseEventLogs,
-  type Address,
-  type Hex,
-} from 'viem'
-import { privateKeyToAccount } from 'viem/accounts'
+  adminToken,
+  chainConfig,
+  facilitator,
+  gamePaymentAddress,
+  network,
+  NPC_TBA_HEADER,
+  NPC_TOKEN_ID_HEADER,
+  orderDbPath,
+  PAYMENT_REQUIRED_HEADER,
+  PAYMENT_RESPONSE_HEADER,
+  PAYMENT_SIGNATURE_HEADER,
+  serverAccount,
+  tbaValidationEnabled,
+} from './config.js'
+import { loadManagedItemIds, quoteBuyPrice } from './chain/gamePayment.js'
+import { resolveMintRecipient } from './chain/tba.js'
+import { errorMessage, log } from './logger.js'
+import { decodePaymentHeader, deriveIdentity } from './payments/idempotency.js'
+import { SqliteOrderStore } from './orders/store.js'
+import type { Order, OrderState } from './orders/types.js'
+import { SerialQueue } from './pipeline/mintQueue.js'
+import { MintWorker } from './pipeline/mintWorker.js'
+import { RefundWorker } from './pipeline/refundWorker.js'
+import { RetryScheduler } from './pipeline/scheduler.js'
 
-// i.e. npc payment wallet address
-const serverPrivateKey = process.env.SERVER_PRIVATE_KEY as Hex
-if (!serverPrivateKey) {
-  console.error('SERVER_PRIVATE_KEY not set in .env (required to call buyItemX402)')
-  process.exit(1)
-}
+// --- Composition root ------------------------------------------------------
 
-const gamePaymentAddress = process.env.GAME_PAYMENT_ADDRESS as Address
-if (!gamePaymentAddress) {
-  console.error('GAME_PAYMENT_ADDRESS not set in .env (deployed GamePayment contract address)')
-  process.exit(1)
-}
+const store = new SqliteOrderStore(orderDbPath)
+const queue = new SerialQueue()
+const mintWorker = new MintWorker(store, queue)
+const refundWorker = new RefundWorker(store, queue)
+const scheduler = new RetryScheduler(store, mintWorker, refundWorker)
 
-const npcNftAddress = (process.env.NPC_NFT_ADDRESS ?? '') as Address | ''
-const erc6551Registry = (process.env.ERC6551_REGISTRY ?? '') as Address
-const erc6551Implementation = (process.env.ERC6551_IMPLEMENTATION ?? '') as Address | ''
-const erc6551Salt = (process.env.ERC6551_SALT ??
-  '0x0000000000000000000000000000000000000000000000000000000000000000') as Hex
-
-const tbaValidationEnabled =
-  npcNftAddress.length > 0 && erc6551Implementation.length > 0
-if (!tbaValidationEnabled) {
-  console.warn(
-    '[boot] TBA validation disabled — set NPC_NFT_ADDRESS and ERC6551_IMPLEMENTATION ' +
-      'in .env to mint loot NFTs to the NPC TBA instead of the operator wallet.',
-  )
-}
+// Max time the request handler blocks on the first inline mint attempt before
+// handing the order off to the background worker and replying with MINTING.
+const INLINE_MINT_TIMEOUT_MS = 8000
 
 const app = express()
-const chainConfig = CHAIN_CONFIGS.arcTestnet
-// arcTestnet lives behind the testnet Gateway; the default URL is mainnet.
-const facilitator = new BatchFacilitatorClient({
-  url: process.env.GATEWAY_URL ?? 'https://gateway-api-testnet.circle.com',
-})
-const network = `eip155:${chainConfig.chain.id}`
 
-const PAYMENT_REQUIRED_HEADER = 'PAYMENT-REQUIRED'
-const PAYMENT_SIGNATURE_HEADER = 'PAYMENT-SIGNATURE'
-const PAYMENT_RESPONSE_HEADER = 'PAYMENT-RESPONSE'
-const NPC_TBA_HEADER = 'X-NPC-TBA'
-const NPC_TOKEN_ID_HEADER = 'X-NPC-TOKEN-ID'
-
-const gamePaymentAbi = [
-  {
-    type: 'function',
-    name: 'getBuyPrice',
-    stateMutability: 'view',
-    inputs: [{ name: 'id', type: 'uint256' }],
-    outputs: [{ name: '', type: 'uint256' }],
-  },
-  {
-    type: 'function',
-    name: 'getItemIds',
-    stateMutability: 'view',
-    inputs: [],
-    outputs: [{ name: '', type: 'uint256[5]' }],
-  },
-  {
-    type: 'function',
-    name: 'buyItemX402',
-    stateMutability: 'nonpayable',
-    inputs: [
-      { name: 'to', type: 'address' },
-      { name: 'id', type: 'uint256' },
-      { name: 'paidAmount', type: 'uint256' },
-      { name: 'maxPriceAllowed', type: 'uint256' },
-    ],
-    outputs: [{ name: 'price', type: 'uint256' }],
-  },
-  {
-    type: 'event',
-    name: 'ItemMinted',
-    inputs: [
-      { name: 'buyer', type: 'address', indexed: true },
-      { name: 'id', type: 'uint256', indexed: true },
-      { name: 'pricePaid', type: 'uint256', indexed: false },
-    ],
-  },
-] as const
-
-const npcCharacterAbi = [
-  {
-    type: 'function',
-    name: 'getPaymentBinding',
-    stateMutability: 'view',
-    inputs: [{ name: 'tokenId', type: 'uint256' }],
-    outputs: [
-      { name: 'wallet', type: 'address' },
-      { name: 'version', type: 'uint64' },
-    ],
-  },
-] as const
-
-const erc6551RegistryAbi = [
-  {
-    type: 'function',
-    name: 'account',
-    stateMutability: 'view',
-    inputs: [
-      { name: 'implementation', type: 'address' },
-      { name: 'salt', type: 'bytes32' },
-      { name: 'chainId', type: 'uint256' },
-      { name: 'tokenContract', type: 'address' },
-      { name: 'tokenId', type: 'uint256' },
-    ],
-    outputs: [{ name: '', type: 'address' }],
-  },
-] as const
-
-const serverAccount = privateKeyToAccount(serverPrivateKey)
-const rpcTransport = http(chainConfig.rpcUrl)
-const publicClient = createPublicClient({ chain: chainConfig.chain, transport: rpcTransport })
-const walletClient = createWalletClient({
-  chain: chainConfig.chain,
-  account: serverAccount,
-  transport: rpcTransport,
-})
-
-// Cached list of managed item ids — read once at boot, used to validate the
-// `:id` URL parameter without an RPC round-trip per request.
-let managedItemIds: readonly bigint[] = []
-
-async function loadManagedItemIds() {
-  const ids = await publicClient.readContract({
-    address: gamePaymentAddress,
-    abi: gamePaymentAbi,
-    functionName: 'getItemIds',
-  })
-  managedItemIds = ids as readonly bigint[]
-}
-
-async function quoteBuyPrice(itemId: bigint): Promise<bigint> {
-  return publicClient.readContract({
-    address: gamePaymentAddress,
-    abi: gamePaymentAbi,
-    functionName: 'getBuyPrice',
-    args: [itemId],
-  })
-}
-
-async function buyItemOnChain(args: {
-  to: Address
-  itemId: bigint
-  paidAmount: bigint
-  maxPriceAllowed: bigint
-}) {
-  const { request } = await publicClient.simulateContract({
-    address: gamePaymentAddress,
-    abi: gamePaymentAbi,
-    functionName: 'buyItemX402',
-    args: [args.to, args.itemId, args.paidAmount, args.maxPriceAllowed],
-    account: serverAccount,
-  })
-
-  const txHash = await walletClient.writeContract(request)
-  const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash })
-
-  const logs = parseEventLogs({
-    abi: gamePaymentAbi,
-    eventName: 'ItemMinted',
-    logs: receipt.logs,
-  })
-  const minted = logs[0]?.args
-
-  return {
-    txHash,
-    itemId: (minted?.id ?? args.itemId).toString(),
-    pricePaid: (minted?.pricePaid ?? args.paidAmount).toString(),
-    blockNumber: receipt.blockNumber.toString(),
-    status: receipt.status,
-  }
-}
-
-// Browser clients see custom response headers only if they're explicitly exposed.
-// Unity's UnityWebRequest doesn't need this, but it lets the same endpoint be
-// driven from a browser-side tester without surprises.
+// Browser clients see custom response headers only if explicitly exposed.
 app.use((_req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*')
   res.setHeader(
@@ -199,15 +50,15 @@ app.use((_req, res, next) => {
   next()
 })
 
+let managedItemIds: readonly bigint[] = []
+
 async function createPaymentRequirements(amountUsdcBaseUnits: bigint) {
   const supported = await facilitator.getSupported()
   const supportedKind = supported.kinds.find((kind) => kind.network === network)
   const verifyingContract = supportedKind?.extra?.verifyingContract
-
   if (typeof verifyingContract !== 'string') {
     throw new Error(`Circle Gateway does not support ${network}`)
   }
-
   return {
     scheme: 'exact',
     network,
@@ -225,93 +76,50 @@ async function createPaymentRequirements(amountUsdcBaseUnits: bigint) {
   }
 }
 
-function decodePaymentHeader(value: string) {
-  // Unity ships PAYMENT-SIGNATURE as Base64(JSON). Be lenient and also accept
-  // raw JSON for hand-rolled curl-style debugging.
-  const buf = Buffer.from(value, 'base64')
-  const candidate = buf.toString('utf-8')
-  try {
-    return JSON.parse(candidate)
-  } catch {
-    return JSON.parse(value)
+// Public JSON shape for an order (used by /item, /order, /admin responses).
+function orderView(order: Order) {
+  return {
+    order_id: order.orderId,
+    state: order.state,
+    payer: order.payer,
+    item_id: order.itemId,
+    amount: order.amount,
+    x402_tx: order.x402Tx,
+    recipient: order.recipient,
+    recipient_kind: order.recipientKind,
+    attempts: order.attempts,
+    refund_attempts: order.refundAttempts,
+    mint: order.mintTx
+      ? { tx_hash: order.mintTx, recipient: order.recipient, recipient_kind: order.recipientKind }
+      : null,
+    refund: order.refundTx ? { tx_hash: order.refundTx } : null,
+    error: order.lastError,
+    updated_at: order.updatedAt,
   }
 }
 
-async function validateTbaForNpc(args: {
-  payer: Address
-  claimedTba: Address
-  tokenId: bigint
-}) {
-  if (!tbaValidationEnabled) {
-    throw new Error(
-      'TBA validation requested but server is not configured ' +
-        '(NPC_NFT_ADDRESS / ERC6551_IMPLEMENTATION missing in .env).',
-    )
-  }
+function setSettlementHeader(res: express.Response, order: Order) {
+  res.setHeader(
+    PAYMENT_RESPONSE_HEADER,
+    Buffer.from(
+      JSON.stringify({
+        success: true,
+        transaction: order.x402Tx,
+        network,
+        payer: order.payer,
+        order_id: order.orderId,
+      }),
+    ).toString('base64'),
+  )
+}
 
-  const [binding, computedTba] = await Promise.all([
-    publicClient.readContract({
-      address: npcNftAddress as Address,
-      abi: npcCharacterAbi,
-      functionName: 'getPaymentBinding',
-      args: [args.tokenId],
-    }),
-    publicClient.readContract({
-      address: erc6551Registry,
-      abi: erc6551RegistryAbi,
-      functionName: 'account',
-      args: [
-        erc6551Implementation as Address,
-        erc6551Salt,
-        BigInt(chainConfig.chain.id),
-        npcNftAddress as Address,
-        args.tokenId,
-      ],
-    }),
+// Block briefly on the first mint so a healthy purchase returns COMPLETED
+// inline; otherwise the background scheduler carries it to completion.
+async function awaitMintBriefly(orderId: string): Promise<void> {
+  await Promise.race([
+    mintWorker.enqueue(orderId),
+    new Promise<void>((resolve) => setTimeout(resolve, INLINE_MINT_TIMEOUT_MS)),
   ])
-
-  const boundWallet = binding[0] as Address
-  if (boundWallet.toLowerCase() !== args.payer.toLowerCase()) {
-    throw new Error(
-      `Payer ${args.payer} is not the bound operator wallet for NPC ${args.tokenId} ` +
-        `(chain says ${boundWallet}).`,
-    )
-  }
-
-  if ((computedTba as Address).toLowerCase() !== args.claimedTba.toLowerCase()) {
-    throw new Error(
-      `Claimed TBA ${args.claimedTba} does not match ERC6551 account for NPC ${args.tokenId} ` +
-        `(registry computed ${computedTba}).`,
-    )
-  }
-}
-
-async function resolveMintRecipient(
-  req: express.Request,
-  payer: Address,
-): Promise<{ recipient: Address; kind: 'payer' | 'tba' }> {
-  const tbaHeaderRaw = req.headers[NPC_TBA_HEADER.toLowerCase()]
-  const tokenIdHeaderRaw = req.headers[NPC_TOKEN_ID_HEADER.toLowerCase()]
-
-  if (!tbaHeaderRaw && !tokenIdHeaderRaw) {
-    console.warn(
-      `[tba] no X-NPC-TBA/X-NPC-TOKEN-ID headers from ${payer} — falling back to ` +
-        'mint-to-payer. Update the Unity client to route loot to the NPC TBA.',
-    )
-    return { recipient: payer, kind: 'payer' }
-  }
-
-  const tbaStr = String(tbaHeaderRaw ?? '')
-  const tokenIdStr = String(tokenIdHeaderRaw ?? '')
-  if (!isAddress(tbaStr)) throw new Error(`Bad ${NPC_TBA_HEADER} header: ${tbaStr}`)
-  if (!/^\d+$/.test(tokenIdStr))
-    throw new Error(`Bad ${NPC_TOKEN_ID_HEADER} header: ${tokenIdStr}`)
-
-  const tba = getAddress(tbaStr)
-  const tokenId = BigInt(tokenIdStr)
-  await validateTbaForNpc({ payer, claimedTba: tba, tokenId })
-  console.log(`[tba] validated tokenId=${tokenId} tba=${tba} payer=${payer}`)
-  return { recipient: tba, kind: 'tba' }
 }
 
 app.get('/item/:id', async (req, res, next) => {
@@ -333,6 +141,7 @@ app.get('/item/:id', async (req, res, next) => {
     const quotedPrice = await quoteBuyPrice(itemId)
     const requirements = await createPaymentRequirements(quotedPrice)
 
+    // --- Step 1: unpaid request -> 402 challenge ---------------------------
     const paymentHeader = req.headers[PAYMENT_SIGNATURE_HEADER.toLowerCase()]
     if (!paymentHeader) {
       const paymentRequired = {
@@ -344,11 +153,11 @@ app.get('/item/:id', async (req, res, next) => {
         },
         accepts: [requirements],
       }
-
-      console.log(
-        `[402] ${req.method} ${req.originalUrl} -> ${quotedPrice.toString()} (USDC base units)`,
-      )
-
+      log.info('payment.challenge', {
+        method: req.method,
+        url: req.originalUrl,
+        price: quotedPrice.toString(),
+      })
       res.status(402)
       res.setHeader(
         PAYMENT_REQUIRED_HEADER,
@@ -358,19 +167,41 @@ app.get('/item/:id', async (req, res, next) => {
       return
     }
 
-    let paymentPayload: Record<string, unknown>
+    // --- Step 2: decode payload + derive idempotency key -------------------
+    let paymentPayload: ReturnType<typeof decodePaymentHeader>
+    let identity: ReturnType<typeof deriveIdentity>
     try {
       paymentPayload = decodePaymentHeader(String(paymentHeader))
+      identity = deriveIdentity(paymentPayload)
     } catch (err) {
-      console.warn('[402] malformed PAYMENT-SIGNATURE header', err)
-      res.status(402).json({ error: 'Malformed PAYMENT-SIGNATURE header' })
+      log.warn('payment.malformed', { error: errorMessage(err) })
+      res.status(402).json({ error: 'Malformed PAYMENT-SIGNATURE header', reason: errorMessage(err) })
+      return
+    }
+    const { orderId, authNonce, payer } = identity
+
+    // --- Step 3: idempotency lookup ----------------------------------------
+    const existing = store.get(orderId)
+    if (existing && existing.state !== 'PENDING_PAYMENT') {
+      // Already past settlement (or terminal). Never re-settle; just report
+      // state and make sure the relevant pipeline is running.
+      if (existing.state === 'SETTLED' || existing.state === 'MINTING') {
+        void mintWorker.enqueue(orderId)
+      } else if (existing.state === 'MINT_FAILED' || existing.state === 'REFUNDING') {
+        void refundWorker.enqueue(orderId)
+      }
+      log.info('order.replay', { orderId, state: existing.state })
+      if (existing.x402Tx) setSettlementHeader(res, existing)
+      res.status(existing.state === 'FAILED' ? 402 : 200)
+      res.json(orderView(existing))
       return
     }
 
-    const payerHint =
-      (paymentPayload.payload as { authorization?: { from?: string } } | undefined)?.authorization
-        ?.from ?? 'unknown'
-    console.log(`[pay] verifying authorization from ${payerHint} for item ${itemId.toString()}`)
+    // New order, or resuming a PENDING_PAYMENT row left by a prior crash.
+    const isResume = existing !== null
+    if (!isResume) {
+      store.create({ orderId, authNonce, payer, itemId: itemId.toString(), amount: quotedPrice.toString() })
+    }
 
     const enrichedPayload = {
       ...paymentPayload,
@@ -382,117 +213,137 @@ app.get('/item/:id', async (req, res, next) => {
       accepted: requirements,
     }
 
+    // --- Step 4: verify ----------------------------------------------------
+    log.info('payment.verify', { orderId, payer, itemId: itemId.toString() })
     const verifyResult = await facilitator.verify(enrichedPayload as never, requirements)
     if (!verifyResult.isValid) {
-      console.warn(`[pay] verify rejected: ${verifyResult.invalidReason}`)
-      res.status(402).json({
-        error: 'Payment verification failed',
-        reason: verifyResult.invalidReason,
-      })
+      store.update(orderId, { state: 'FAILED', lastError: `verify: ${verifyResult.invalidReason}` })
+      log.warn('payment.verify_rejected', { orderId, reason: verifyResult.invalidReason })
+      res.status(402).json({ error: 'Payment verification failed', reason: verifyResult.invalidReason })
       return
     }
 
+    // --- Step 5: resolve recipient BEFORE settling -------------------------
+    // We must not capture funds we cannot deliver, so TBA validation happens
+    // before settle. A bad TBA header fails here with no money taken.
+    let recipient: { recipient: Address; kind: 'tba' | 'payer' }
+    try {
+      recipient = await resolveMintRecipient({
+        payer: (verifyResult.payer as Address) ?? payer,
+        tbaHeader: req.headers[NPC_TBA_HEADER.toLowerCase()] as string | undefined,
+        tokenIdHeader: req.headers[NPC_TOKEN_ID_HEADER.toLowerCase()] as string | undefined,
+      })
+    } catch (err) {
+      const reason = errorMessage(err)
+      store.update(orderId, { state: 'FAILED', lastError: `recipient: ${reason}` })
+      log.warn('payment.recipient_rejected', { orderId, error: reason })
+      res.status(402).json({ error: 'Recipient validation failed; refusing to settle', reason })
+      return
+    }
+
+    // --- Step 6: settle ----------------------------------------------------
     const settleResult = await facilitator.settle(enrichedPayload as never, requirements)
     if (!settleResult.success) {
-      console.warn(`[pay] settle rejected: ${settleResult.errorReason}`)
-      res.status(402).json({
-        error: 'Payment settlement failed',
-        reason: settleResult.errorReason,
+      // Edge case: if this is a resumed order and the failure is "nonce already
+      // used", a prior attempt likely settled before crashing. We cannot
+      // recover the tx hash here, so we surface it loudly for an operator.
+      const reason = settleResult.errorReason ?? 'unknown'
+      const nonceUsed = isResume && /nonce/i.test(reason) && /used|already/i.test(reason)
+      store.update(orderId, { state: 'FAILED', lastError: `settle: ${reason}` })
+      log[nonceUsed ? 'error' : 'warn']('payment.settle_rejected', {
+        orderId,
+        reason,
+        ...(nonceUsed ? { alert: 'possible orphaned settlement — verify on-chain' } : {}),
       })
+      res.status(402).json({ error: 'Payment settlement failed', reason })
       return
     }
 
-    const payer = (settleResult.payer ?? verifyResult.payer) as Address
-    console.log(`[pay] settled tx=${settleResult.transaction} payer=${payer}`)
-
-    res.setHeader(
-      PAYMENT_RESPONSE_HEADER,
-      Buffer.from(
-        JSON.stringify({
-          success: true,
-          transaction: settleResult.transaction,
-          network: requirements.network,
-          payer,
-        }),
-      ).toString('base64'),
-    )
-
-    let recipientInfo: { recipient: Address; kind: 'payer' | 'tba' }
-    try {
-      recipientInfo = await resolveMintRecipient(req, payer)
-    } catch (err) {
-      const reason = err instanceof Error ? err.message : String(err)
-      console.warn(`[tba] validation failed; refusing to mint: ${reason}`)
-      res.json({
-        x402_tx: settleResult.transaction,
-        payer,
-        payTo: requirements.payTo,
-        amount: requirements.amount,
-        item_id: itemId.toString(),
-        quoted_price: quotedPrice.toString(),
-        mint: { error: reason, recipient_kind: 'payer' },
-      })
-      return
-    }
-
-    let buyResult: Awaited<ReturnType<typeof buyItemOnChain>> | null = null
-    let buyError: string | null = null
-    try {
-      buyResult = await buyItemOnChain({
-        to: recipientInfo.recipient,
-        itemId,
-        paidAmount: quotedPrice,
-        maxPriceAllowed: quotedPrice,
-      })
-      console.log(
-        `[mint] tx=${buyResult.txHash} buyer=${recipientInfo.recipient} (${recipientInfo.kind}) ` +
-          `id=${buyResult.itemId} price=${buyResult.pricePaid} status=${buyResult.status}`,
-      )
-    } catch (err) {
-      buyError = err instanceof Error ? err.message : String(err)
-      console.warn(`[mint] buyItemX402 failed for ${recipientInfo.recipient}: ${buyError}`)
-    }
-
-    res.json({
-      x402_tx: settleResult.transaction,
-      payer,
-      payTo: requirements.payTo,
-      amount: requirements.amount,
-      item_id: itemId.toString(),
-      quoted_price: quotedPrice.toString(),
-      mint: buyResult
-        ? {
-            tx_hash: buyResult.txHash,
-            item_id: buyResult.itemId,
-            price_paid: buyResult.pricePaid,
-            block_number: buyResult.blockNumber,
-            status: buyResult.status,
-            recipient: recipientInfo.recipient,
-            recipient_kind: recipientInfo.kind,
-          }
-        : { error: buyError, recipient_kind: recipientInfo.kind },
+    const settledPayer = (settleResult.payer ?? verifyResult.payer ?? payer) as Address
+    const order = store.update(orderId, {
+      state: 'SETTLED',
+      payer: settledPayer,
+      x402Tx: settleResult.transaction as `0x${string}`,
+      recipient: getAddress(recipient.recipient),
+      recipientKind: recipient.kind,
+      nextRetryAt: Date.now(),
+      lastError: null,
     })
+    log.info('payment.settled', { orderId, x402Tx: settleResult.transaction, payer: settledPayer })
+    setSettlementHeader(res, order)
+
+    // --- Step 7: mint (inline first attempt, background retries) -----------
+    await awaitMintBriefly(orderId)
+    const finalOrder = store.get(orderId) ?? order
+    res.status(200).json(orderView(finalOrder))
   } catch (error) {
     next(error)
   }
 })
 
-await loadManagedItemIds()
-console.log(
-  `[boot] cached ${managedItemIds.length} managed item ids: ` +
-    managedItemIds.map((x) => x.toString()).join(', '),
-)
-
-app.listen(4021, () => {
-  console.log('Server on http://localhost:4021')
-  console.log('Paywall: GET /item/:id -> USDC nanopayment (Circle Gateway) + buyItemX402')
-  console.log(`GamePayment contract: ${gamePaymentAddress}`)
-  console.log(`Minter (onlyOwner) : ${serverAccount.address}`)
-  if (tbaValidationEnabled) {
-    console.log(
-      `TBA routing  : enabled (registry=${erc6551Registry}, npc=${npcNftAddress})`,
-    )
-  } else {
-    console.log('TBA routing  : DISABLED — mints land on operator wallet (legacy)')
+// Order status — clients poll this until COMPLETED / REFUNDED / *_FAILED.
+app.get('/order/:orderId', (req, res) => {
+  const order = store.get(req.params.orderId.toLowerCase())
+  if (!order) {
+    res.status(404).json({ error: `Unknown order ${req.params.orderId}` })
+    return
   }
+  res.json(orderView(order))
 })
+
+// Operator visibility into stuck orders. Disabled unless ADMIN_TOKEN is set.
+app.get('/admin/orders', (req, res) => {
+  if (!adminToken) {
+    res.status(404).json({ error: 'admin endpoint disabled (set ADMIN_TOKEN)' })
+    return
+  }
+  if (req.headers.authorization !== `Bearer ${adminToken}`) {
+    res.status(401).json({ error: 'unauthorized' })
+    return
+  }
+  const KNOWN: OrderState[] = [
+    'PENDING_PAYMENT', 'FAILED', 'SETTLED', 'MINTING', 'COMPLETED',
+    'MINT_FAILED', 'REFUNDING', 'REFUNDED', 'REFUND_FAILED',
+  ]
+  const state = (req.query.state as string | undefined) ?? 'REFUND_FAILED'
+  if (!KNOWN.includes(state as OrderState)) {
+    res.status(400).json({ error: `Unknown state ${state}`, known: KNOWN })
+    return
+  }
+  res.json(store.listByState(state as OrderState).map(orderView))
+})
+
+// Express 5 error handler.
+app.use((err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  log.error('http.unhandled', { error: errorMessage(err) })
+  if (!res.headersSent) res.status(500).json({ error: 'internal error', reason: errorMessage(err) })
+})
+
+// --- Boot ------------------------------------------------------------------
+
+managedItemIds = await loadManagedItemIds()
+log.info('boot.items_loaded', { count: managedItemIds.length, ids: managedItemIds.map((x) => x.toString()) })
+
+scheduler.reconcileOnBoot()
+scheduler.start()
+
+const server = app.listen(4021, () => {
+  log.info('boot.listening', {
+    url: 'http://localhost:4021',
+    gamePayment: gamePaymentAddress,
+    minter: serverAccount.address,
+    tbaRouting: tbaValidationEnabled,
+    dbPath: orderDbPath,
+  })
+})
+
+function shutdown(signal: string) {
+  log.info('boot.shutdown', { signal, inFlight: queue.size })
+  scheduler.stop()
+  server.close(() => {
+    store.close()
+    process.exit(0)
+  })
+}
+process.on('SIGINT', () => shutdown('SIGINT'))
+process.on('SIGTERM', () => shutdown('SIGTERM'))
