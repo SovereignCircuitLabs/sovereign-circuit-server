@@ -3,9 +3,10 @@
 **Language / 语言 / 語言**:
 [English](#english) ｜ [简体中文](#简体中文) ｜ [繁體中文](#繁體中文)
 
-- 🌐 Website / 官网 / 官網: https://sovereign-circuit.com/
-- 🎬 Video / 视频介绍 / 影片介紹: https://www.youtube.com/watch?v=CTXvgje_fYE
+**Links / 链接 / 連結**:
 
+- 🌐 Website / 项目官网 / 專案官網: https://sovereign-circuit.com/
+- 📺 Video intro / 视频介绍 / 影片介紹: https://www.youtube.com/watch?v=CTXvgje_fYE
 - Unity Client: https://github.com/SovereignCircuitLabs/sovereign-circuit-unity
 - Smart Contracts: https://github.com/SovereignCircuitLabs/sovereign-circuit-contracts
 - x402 Seller Server (this repo): https://github.com/SovereignCircuitLabs/sovereign-circuit-server
