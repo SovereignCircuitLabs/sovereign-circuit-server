@@ -1,66 +1,8 @@
 import { parseEventLogs, type Address, type Hex } from 'viem'
+import { gamePaymentAbi } from '../abi/gamePaymentAbi.js'
 import { gamePaymentAddress, publicClient, serverAccount, walletClient } from '../config.js'
 
-export const gamePaymentAbi = [
-  {
-    type: 'function',
-    name: 'getBuyPrice',
-    stateMutability: 'view',
-    inputs: [{ name: 'id', type: 'uint256' }],
-    outputs: [{ name: '', type: 'uint256' }],
-  },
-  {
-    type: 'function',
-    name: 'getItemIds',
-    stateMutability: 'view',
-    inputs: [],
-    outputs: [{ name: '', type: 'uint256[5]' }],
-  },
-  {
-    type: 'function',
-    name: 'buyItemX402',
-    stateMutability: 'nonpayable',
-    inputs: [
-      { name: 'to', type: 'address' },
-      { name: 'id', type: 'uint256' },
-      { name: 'paidAmount', type: 'uint256' },
-      { name: 'maxPriceAllowed', type: 'uint256' },
-    ],
-    outputs: [{ name: 'price', type: 'uint256' }],
-  },
-  // Owner-only compensation: refunds `amount` USDC base units back into the
-  // buyer's Circle Gateway balance via GatewayWallet.depositFor. Pays out of
-  // the contract's USDC pool, so the failed payment must have settled here
-  // first. Reverts if the gateway is unset or the pool is short (the refund
-  // worker treats a revert as a failed attempt and retries / parks the order).
-  {
-    type: 'function',
-    name: 'refundToGateway',
-    stateMutability: 'nonpayable',
-    inputs: [
-      { name: 'buyer', type: 'address' },
-      { name: 'amount', type: 'uint256' },
-    ],
-    outputs: [],
-  },
-  {
-    type: 'event',
-    name: 'ItemMinted',
-    inputs: [
-      { name: 'buyer', type: 'address', indexed: true },
-      { name: 'id', type: 'uint256', indexed: true },
-      { name: 'pricePaid', type: 'uint256', indexed: false },
-    ],
-  },
-  {
-    type: 'event',
-    name: 'RefundedToGateway',
-    inputs: [
-      { name: 'buyer', type: 'address', indexed: true },
-      { name: 'amount', type: 'uint256', indexed: false },
-    ],
-  },
-] as const
+export { gamePaymentAbi }
 
 export async function loadManagedItemIds(): Promise<readonly bigint[]> {
   const ids = await publicClient.readContract({

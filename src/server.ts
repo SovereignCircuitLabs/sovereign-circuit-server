@@ -19,6 +19,7 @@ import { loadManagedItemIds, quoteBuyPrice } from './chain/gamePayment.js'
 import { resolveMintRecipient } from './chain/tba.js'
 import { errorMessage, log } from './logger.js'
 import { decodePaymentHeader, deriveIdentity } from './payments/idempotency.js'
+import { contractRoutes } from './routes/contractRoutes.js'
 import { SqliteOrderStore } from './orders/store.js'
 import type { Order, OrderState } from './orders/types.js'
 import { SerialQueue } from './pipeline/mintQueue.js'
@@ -39,14 +40,21 @@ const scheduler = new RetryScheduler(store, mintWorker, refundWorker)
 const INLINE_MINT_TIMEOUT_MS = 8000
 
 const app = express()
+app.use(express.json({ limit: '64kb' }))
 
 // Browser clients see custom response headers only if explicitly exposed.
 app.use((_req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*')
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS')
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, PAYMENT-SIGNATURE, X-NPC-TBA, X-NPC-TOKEN-ID')
   res.setHeader(
     'Access-Control-Expose-Headers',
     [PAYMENT_REQUIRED_HEADER, PAYMENT_RESPONSE_HEADER].join(', '),
   )
+  if (_req.method === 'OPTIONS') {
+    res.status(204).end()
+    return
+  }
   next()
 })
 
@@ -313,10 +321,12 @@ app.get('/admin/orders', (req, res) => {
   res.json(store.listByState(state as OrderState).map(orderView))
 })
 
+app.use('/api', contractRoutes)
+
 // Express 5 error handler.
 app.use((err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
   log.error('http.unhandled', { error: errorMessage(err) })
-  if (!res.headersSent) res.status(500).json({ error: 'internal error', reason: errorMessage(err) })
+  if (!res.headersSent) res.status(500).json({ error: 'request failed', reason: errorMessage(err) })
 })
 
 // --- Boot ------------------------------------------------------------------
