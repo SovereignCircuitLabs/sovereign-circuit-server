@@ -20,6 +20,7 @@ import { resolveMintRecipient } from './chain/tba.js'
 import { errorMessage, log } from './logger.js'
 import { decodePaymentHeader, deriveIdentity } from './payments/idempotency.js'
 import { contractRoutes } from './routes/contractRoutes.js'
+import { ContractServiceError } from './services/contractErrors.js'
 import { SqliteOrderStore } from './orders/store.js'
 import type { Order, OrderState } from './orders/types.js'
 import { SerialQueue } from './pipeline/mintQueue.js'
@@ -325,8 +326,16 @@ app.use('/api', contractRoutes)
 
 // Express 5 error handler.
 app.use((err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
-  log.error('http.unhandled', { error: errorMessage(err) })
-  if (!res.headersSent) res.status(500).json({ error: 'request failed', reason: errorMessage(err) })
+  const reason = errorMessage(err)
+  const status = err instanceof ContractServiceError
+    ? 502
+    : /is not configured/.test(reason)
+      ? 503
+      : /must be|Invalid|Bad /.test(reason)
+        ? 400
+        : 500
+  log.error('http.unhandled', { status, error: reason })
+  if (!res.headersSent) res.status(status).json({ error: 'request failed', reason })
 })
 
 // --- Boot ------------------------------------------------------------------

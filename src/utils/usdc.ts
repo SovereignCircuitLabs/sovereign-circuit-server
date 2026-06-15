@@ -9,9 +9,13 @@ export function parseUsdc(amount: string): bigint {
   return parseUnits(amount, USDC_DECIMALS)
 }
 
+export const parseUsdcAmountToUnits = parseUsdc
+
 export function formatUsdc(amount: bigint): string {
   return formatUnits(amount, USDC_DECIMALS)
 }
+
+export const formatUsdcUnits = formatUsdc
 
 export function parseUint256String(value: unknown, fieldName: string): bigint {
   if (typeof value !== 'string' || !/^\d+$/.test(value)) {

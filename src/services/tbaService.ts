@@ -1,6 +1,16 @@
 import { getAddress, isAddress, type Address, type Hex } from 'viem'
 import { erc6551AccountAbi } from '../abi/erc6551AccountAbi.js'
-import { gamePaymentAddress, publicClient, serverAccount, walletClient } from '../config.js'
+import {
+  gamePaymentAddress,
+  gatewayWalletAddress,
+  npcMarketplaceAddress,
+  npcNftAddress,
+  npcPricingAddress,
+  publicClient,
+  serverAccount,
+  usdcAddress,
+  walletClient,
+} from '../config.js'
 import { contractCall } from './contractErrors.js'
 import type { TxReceiptView } from './gamePaymentService.js'
 
@@ -14,8 +24,17 @@ function envAllowedTargets(): Address[] {
 }
 
 function allowedTargets(extraTargets: readonly Address[] = []): Set<string> {
+  const configuredTargets = [
+    gamePaymentAddress,
+    usdcAddress,
+    gatewayWalletAddress,
+    npcMarketplaceAddress,
+    npcNftAddress,
+    npcPricingAddress,
+  ].filter((address): address is Address => Boolean(address))
+
   return new Set(
-    [gamePaymentAddress, ...envAllowedTargets(), ...extraTargets].map((address) =>
+    [...configuredTargets, ...envAllowedTargets(), ...extraTargets].map((address) =>
       address.toLowerCase(),
     ),
   )

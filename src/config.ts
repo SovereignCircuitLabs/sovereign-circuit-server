@@ -24,12 +24,21 @@ function intEnv(name: string, fallback: number): number {
   return Number.isFinite(parsed) ? parsed : fallback
 }
 
+// --- Chain clients ---------------------------------------------------------
+
+export const chainConfig = CHAIN_CONFIGS.arcTestnet
+export const network = `eip155:${chainConfig.chain.id}`
+
 // --- Secrets / addresses ---------------------------------------------------
 
 export const serverPrivateKey = required('SERVER_PRIVATE_KEY') as Hex
 export const gamePaymentAddress = required('GAME_PAYMENT_ADDRESS') as Address
 
-export const npcNftAddress = (process.env.NPC_NFT_ADDRESS ?? '') as Address | ''
+export const npcNftAddress = (process.env.NPC_NFT_ADDRESS ?? process.env.NPC_CHARACTER_ADDRESS ?? '') as Address | ''
+export const npcMarketplaceAddress = (process.env.NPC_MARKETPLACE_ADDRESS ?? '') as Address | ''
+export const npcPricingAddress = (process.env.NPC_PRICING_ADDRESS ?? '') as Address | ''
+export const usdcAddress = (process.env.USDC_ADDRESS ?? chainConfig.usdc) as Address
+export const gatewayWalletAddress = (process.env.GATEWAY_WALLET_ADDRESS ?? '') as Address | ''
 export const erc6551Registry = (process.env.ERC6551_REGISTRY ?? '') as Address
 export const erc6551Implementation = (process.env.ERC6551_IMPLEMENTATION ?? '') as Address | ''
 export const erc6551Salt = (process.env.ERC6551_SALT ??
@@ -38,13 +47,9 @@ export const erc6551Salt = (process.env.ERC6551_SALT ??
 export const tbaValidationEnabled =
   npcNftAddress.length > 0 && erc6551Implementation.length > 0
 
-// --- Chain clients ---------------------------------------------------------
-
-export const chainConfig = CHAIN_CONFIGS.arcTestnet
-export const network = `eip155:${chainConfig.chain.id}`
-
 export const serverAccount = privateKeyToAccount(serverPrivateKey)
-const rpcTransport = http(chainConfig.rpcUrl)
+export const rpcUrl = process.env.ARC_RPC_URL ?? chainConfig.rpcUrl
+const rpcTransport = http(rpcUrl)
 export const publicClient = createPublicClient({
   chain: chainConfig.chain,
   transport: rpcTransport,
