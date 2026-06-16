@@ -5,15 +5,27 @@ import { requiredConfiguredAddress } from '../utils/validation.js'
 import { contractCall } from './contractErrors.js'
 import type { TxReceiptView } from './gamePaymentService.js'
 
-type NpcTuple = readonly [
-  string,
-  string,
-  number,
-  number,
-  number,
-  number,
-  readonly [number, number, number, bigint, bigint, number, number, bigint, bigint],
-]
+type NpcPortfolioStruct = {
+  livingNeedsWeightBps: number
+  reserveWeightBps: number
+  tradingWeightBps: number
+  minimumLivingBudgetUSDC: bigint
+  minimumReserveBudgetUSDC: bigint
+  rebalanceIntervalSeconds: number
+  chainActionCooldownSeconds: number
+  minTradeUSDC: bigint
+  maxTradeUSDC: bigint
+}
+
+type NpcStruct = {
+  npcName: string
+  metadataURI: string
+  archetype: number
+  riskLevel: number
+  level: number
+  reputation: number
+  portfolio: NpcPortfolioStruct
+}
 
 async function waitFor(hash: `0x${string}`): Promise<TxReceiptView> {
   const receipt = await publicClient.waitForTransactionReceipt({ hash })
@@ -54,25 +66,25 @@ async function write(functionName: string, args: readonly unknown[]): Promise<Tx
   return contractCall(`NpcCharacter.${functionName}.receipt`, () => waitFor(hash))
 }
 
-function npcView(npc: NpcTuple) {
-  const portfolio = npc[6]
+function npcView(npc: NpcStruct) {
+  const p = npc.portfolio
   return {
-    npcName: npc[0],
-    metadataURI: npc[1],
-    archetype: npc[2],
-    riskLevel: npc[3],
-    level: npc[4],
-    reputation: npc[5],
+    npcName: npc.npcName,
+    metadataURI: npc.metadataURI,
+    archetype: npc.archetype,
+    riskLevel: npc.riskLevel,
+    level: npc.level,
+    reputation: npc.reputation,
     portfolio: {
-      livingNeedsWeightBps: portfolio[0],
-      reserveWeightBps: portfolio[1],
-      tradingWeightBps: portfolio[2],
-      minimumLivingBudgetUSDC: portfolio[3],
-      minimumReserveBudgetUSDC: portfolio[4],
-      rebalanceIntervalSeconds: portfolio[5],
-      chainActionCooldownSeconds: portfolio[6],
-      minTradeUSDC: portfolio[7],
-      maxTradeUSDC: portfolio[8],
+      livingNeedsWeightBps: p.livingNeedsWeightBps,
+      reserveWeightBps: p.reserveWeightBps,
+      tradingWeightBps: p.tradingWeightBps,
+      minimumLivingBudgetUSDC: p.minimumLivingBudgetUSDC,
+      minimumReserveBudgetUSDC: p.minimumReserveBudgetUSDC,
+      rebalanceIntervalSeconds: p.rebalanceIntervalSeconds,
+      chainActionCooldownSeconds: p.chainActionCooldownSeconds,
+      minTradeUSDC: p.minTradeUSDC,
+      maxTradeUSDC: p.maxTradeUSDC,
     },
   }
 }
@@ -95,7 +107,7 @@ export const npcCharacterService = {
     return read('nextTokenId') as Promise<bigint>
   },
   async getNpc(tokenId: bigint) {
-    return npcView((await read('getNpc', [tokenId])) as NpcTuple)
+    return npcView((await read('getNpc', [tokenId])) as NpcStruct)
   },
   bindPaymentWallet(tokenId: bigint, wallet: Address) {
     return write('bindPaymentWallet', [tokenId, wallet])

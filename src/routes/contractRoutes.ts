@@ -1,5 +1,5 @@
 import { Router, type Request, type Response, type NextFunction } from 'express'
-import { BaseError, type Hex } from 'viem'
+import { BaseError, TransactionReceiptNotFoundError, type Hex } from 'viem'
 import { adminToken, publicClient, serverAccount } from '../config.js'
 import { errorMessage } from '../logger.js'
 import { erc1155Service } from '../services/erc1155Service.js'
@@ -371,6 +371,50 @@ contractRoutes.post('/tx/send-raw', asyncRoute(async (req, res) => {
   } catch {
     res.json({ txHash: hash, status: 'pending', blockNumber: null, gasUsed: null })
   }
+}))
+
+// Read-only receipt lookup for clients that can't speak JSON-RPC directly
+// (e.g. Unity WebGL — Nethereum's RpcClient trips IL2CPP stripping on
+// RpcParametersJsonConverter, so we expose receipts as plain JSON instead).
+// Returns the same shape as /tx/send-raw's success path; status: "pending"
+// when the tx isn't on-chain yet, so callers can poll on a fixed cadence.
+// We also peek at getTransaction to tell apart "in mempool, just slow" from
+// "node doesn't know this hash at all" — the latter is almost always a
+// dropped/replaced tx and the client should bail out instead of polling forever.
+contractRoutes.get('/tx/receipt/:hash', asyncRoute(async (req, res) => {
+  const raw = param(req, 'hash')
+  if (!raw || !/^0x[0-9a-fA-F]{64}$/.test(raw)) {
+    res.status(400).json({ error: 'hash must be a 0x-prefixed 32-byte hex string' })
+    return
+  }
+  const hash = raw as Hex
+  try {
+    const receipt = await publicClient.getTransactionReceipt({ hash })
+    sendJson(res, {
+      txHash: hash,
+      status: receipt.status,
+      blockNumber: receipt.blockNumber.toString(),
+      gasUsed: receipt.gasUsed.toString(),
+    })
+    return
+  } catch (err) {
+    if (!(err instanceof TransactionReceiptNotFoundError)) throw err
+  }
+
+  // No receipt — is the tx at least in the mempool / known to the node?
+  let known = false
+  try {
+    const tx = await publicClient.getTransaction({ hash })
+    known = tx != null
+  } catch {
+    known = false
+  }
+  res.json({
+    txHash: hash,
+    status: known ? 'pending' : 'unknown',
+    blockNumber: null,
+    gasUsed: null,
+  })
 }))
 
 contractRoutes.post('/npc-marketplace/list', asyncRoute(async (req, res) => {
