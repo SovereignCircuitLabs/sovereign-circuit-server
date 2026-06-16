@@ -1,5 +1,9 @@
 import { Router, type Request, type Response, type NextFunction } from 'express'
-import { adminToken } from '../config.js'
+import { encodeFunctionData } from 'viem'
+import { erc1155Abi } from '../abi/erc1155Abi.js'
+import { erc20Abi } from '../abi/erc20Abi.js'
+import { gamePaymentAbi } from '../abi/gamePaymentAbi.js'
+import { adminToken, gamePaymentAddress, serverAccount, usdcAddress } from '../config.js'
 import { erc1155Service } from '../services/erc1155Service.js'
 import { erc721Service } from '../services/erc721Service.js'
 import { gatewayWalletService } from '../services/gatewayWalletService.js'
@@ -49,6 +53,22 @@ function requireWriteAuth(req: Request, res: Response): boolean {
     res.status(401).json({ error: 'unauthorized' })
     return false
   }
+  return true
+}
+
+// A TBA execute() reverts in ERC6551 _isValidSigner when the NPC's bound
+// paymentWallet is missing or is not the serverAccount. Surface that as a 409
+// with an actionable message instead of the generic 502 the error handler would
+// otherwise return for a ContractServiceError. Returns true if it handled the error.
+function respondSignerRejection(res: Response, err: unknown, tokenId: bigint): boolean {
+  const message = err instanceof Error ? err.message : String(err)
+  if (!/InvalidSigner|Unauthorized|valid signer|isValidSigner/i.test(message)) return false
+  res.status(409).json({
+    error: 'npc payment wallet not bound to server account',
+    reason:
+      `NPC tokenId ${tokenId} has no paymentWallet bound to serverAccount ${serverAccount.address}. ` +
+      'Call POST /npc-character/payment-binding to bind first.',
+  })
   return true
 }
 
@@ -314,6 +334,101 @@ contractRoutes.post('/game/mint-random-x402', asyncRoute(async (req, res) => {
   const body = req.body as Record<string, unknown>
   const to = assertAddress(body.to, 'to')
   sendJson(res, await gamePaymentService.mintRandomX402(to))
+}))
+
+// NPC-perspective aggregate writes. Unlike /game/item/:id/sell and
+// /game/mint-random (which act as serverAccount), these route the call through
+// the NPC's ERC-6551 TBA via tbaService.execute, so msg.sender is the TBA that
+// actually holds the items / pays the USDC. Each lazily fixes the prerequisite
+// approval (ERC1155 operator / USDC allowance) in the same request.
+contractRoutes.post('/npc/:tokenId/sell-item/:itemId', asyncRoute(async (req, res) => {
+  if (!requireWriteAuth(req, res)) return
+  const tokenId = assertUintParam(param(req, 'tokenId'), 'tokenId')
+  const itemId = assertUintParam(param(req, 'itemId'), 'itemId')
+  try {
+    const [tba, itemsAddr] = await Promise.all([
+      gamePaymentService.npcTba(tokenId),
+      gamePaymentService.itemsAddress(),
+    ])
+
+    let approvalTxHash: string | undefined
+    const approved = await erc1155Service.isApprovedForAll(itemsAddr, tba, gamePaymentAddress)
+    if (!approved) {
+      const approvalReceipt = await tbaService.execute({
+        account: tba,
+        to: itemsAddr,
+        value: 0n,
+        data: encodeFunctionData({
+          abi: erc1155Abi,
+          functionName: 'setApprovalForAll',
+          args: [gamePaymentAddress, true],
+        }),
+        operation: 0,
+        extraAllowedTargets: [itemsAddr],
+      })
+      approvalTxHash = approvalReceipt.txHash
+    }
+
+    const receipt = await tbaService.execute({
+      account: tba,
+      to: gamePaymentAddress,
+      value: 0n,
+      data: encodeFunctionData({
+        abi: gamePaymentAbi,
+        functionName: 'sellItem',
+        args: [itemId],
+      }),
+      operation: 0,
+    })
+
+    sendJson(res, { tokenId, itemId, tba, approvalTxHash, ...receipt })
+  } catch (err) {
+    if (respondSignerRejection(res, err, tokenId)) return
+    throw err
+  }
+}))
+
+contractRoutes.post('/npc/:tokenId/mint-random', asyncRoute(async (req, res) => {
+  if (!requireWriteAuth(req, res)) return
+  const tokenId = assertUintParam(param(req, 'tokenId'), 'tokenId')
+  const maxPriceAllowed = parseUint256String((req.body as Record<string, unknown>).maxPriceAllowed, 'maxPriceAllowed')
+  try {
+    const tba = await gamePaymentService.npcTba(tokenId)
+
+    let approvalTxHash: string | undefined
+    const allowance = await usdcService.allowance(tba, gamePaymentAddress)
+    if (allowance < maxPriceAllowed) {
+      const approvalReceipt = await tbaService.execute({
+        account: tba,
+        to: usdcAddress,
+        value: 0n,
+        data: encodeFunctionData({
+          abi: erc20Abi,
+          functionName: 'approve',
+          args: [gamePaymentAddress, maxPriceAllowed],
+        }),
+        operation: 0,
+      })
+      approvalTxHash = approvalReceipt.txHash
+    }
+
+    const receipt = await tbaService.execute({
+      account: tba,
+      to: gamePaymentAddress,
+      value: 0n,
+      data: encodeFunctionData({
+        abi: gamePaymentAbi,
+        functionName: 'mintRandom',
+        args: [maxPriceAllowed],
+      }),
+      operation: 0,
+    })
+
+    sendJson(res, { tokenId, tba, maxPriceAllowed, approvalTxHash, ...receipt })
+  } catch (err) {
+    if (respondSignerRejection(res, err, tokenId)) return
+    throw err
+  }
 }))
 
 contractRoutes.post('/npc-marketplace/list', asyncRoute(async (req, res) => {
