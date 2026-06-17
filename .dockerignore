@@ -1,0 +1,16 @@
+# Never ship the Windows-built native modules — better-sqlite3 must recompile
+# for the Linux container.
+node_modules
+
+# Local order DB and secrets must not leak into the image.
+data
+*.db
+.env
+.env.*
+!.env.example
+
+# Test/scratch artifacts.
+body.json
+dist
+.git
+.gitignore
